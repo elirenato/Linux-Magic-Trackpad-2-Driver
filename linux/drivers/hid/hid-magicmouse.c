@@ -24,7 +24,7 @@
 
 #include "hid-ids.h"
 
-static bool emulate_3button = true;
+static bool emulate_3button = false;
 module_param(emulate_3button, bool, 0644);
 MODULE_PARM_DESC(emulate_3button, "Emulate a middle button");
 
@@ -32,14 +32,11 @@ static bool middle_click_3finger = false;
 module_param(middle_click_3finger, bool, 0644);
 MODULE_PARM_DESC(middle_click_3finger, "Use 3 finger click to emulate middle button");
 
-static int middle_button_start = -250;
-static int middle_button_stop = +250;
-
 static bool emulate_scroll_wheel = true;
 module_param(emulate_scroll_wheel, bool, 0644);
 MODULE_PARM_DESC(emulate_scroll_wheel, "Emulate a scroll wheel");
 
-static unsigned int scroll_speed = 32;
+static unsigned int scroll_speed = 5;
 static int param_set_scroll_speed(const char *val,
 				  const struct kernel_param *kp) {
 	unsigned long speed;
@@ -55,7 +52,7 @@ static bool scroll_acceleration = false;
 module_param(scroll_acceleration, bool, 0644);
 MODULE_PARM_DESC(scroll_acceleration, "Accelerate sequential scroll events");
 
-static bool report_undeciphered;
+static bool report_undeciphered = false;
 module_param(report_undeciphered, bool, 0644);
 MODULE_PARM_DESC(report_undeciphered, "Report undeciphered multi-touch state field using a MSC_RAW event");
 
@@ -77,7 +74,7 @@ MODULE_PARM_DESC(report_undeciphered, "Report undeciphered multi-touch state fie
 #define TOUCH_STATE_START 0x30
 #define TOUCH_STATE_DRAG  0x40
 
-#define SCROLL_ACCEL_DEFAULT 3
+#define SCROLL_ACCEL_DEFAULT 1
 
 /* Touch surface information. Dimension is in hundredths of a mm, min and max
  * are in units. */
@@ -141,93 +138,6 @@ struct magicmouse_sc {
 	} touches[MAX_TOUCHES];
 	int tracking_ids[MAX_TOUCHES];
 };
-
-static int magicmouse_firm_touch(struct magicmouse_sc *msc)
-{
-	int touch = -1;
-	int ii;
-
-	/* If there is only one "firm" touch, set touch to its
-	 * tracking ID.
-	 */
-	for (ii = 0; ii < msc->ntouches; ii++) {
-		int idx = msc->tracking_ids[ii];
-		if (msc->touches[idx].size < 8) {
-			/* Ignore this touch. */
-		} else if (touch >= 0) {
-			touch = -1;
-			break;
-		} else {
-			touch = idx;
-		}
-	}
-
-	return touch;
-}
-
-static int magicmouse_detect_3finger_click(struct magicmouse_sc *msc)
-{
-	int fingers = 0;
-	int ii;
-
-	/* Only consider fingers with size > 10 as real clicks.
-	 * TODO: Consider better palm rejection.
-	 */
-	for (ii = 0; ii < msc->ntouches; ii++) {
-		int idx = msc->tracking_ids[ii];
-		if (msc->touches[idx].size > 10) {
-			fingers++;
-		}
-	}
-
-	return fingers;
-}
-
-static void magicmouse_emit_buttons(struct magicmouse_sc *msc, int state)
-{
-	int last_state = test_bit(BTN_LEFT, msc->input->key) << 0 |
-		test_bit(BTN_RIGHT, msc->input->key) << 1 |
-		test_bit(BTN_MIDDLE, msc->input->key) << 2;
-
-	if (emulate_3button) {
-		int id;
-
-		/* If some button was pressed before, keep it held
-		 * down.  Otherwise, if there's exactly one firm
-		 * touch, use that to override the mouse's guess.
-		 */
-		if (state == 0) {
-			/* The button was released. */
-		} else if (last_state != 0) {
-			state = last_state;
-		} else if (middle_click_3finger){
-			int x;
-			id = magicmouse_firm_touch(msc);
-			x = msc->touches[id].x;
-			if (magicmouse_detect_3finger_click(msc) > 2)
-				state = 4;
-			else if (x <= 0)
-				state = 1;
-			else if (x > 0)
-				state = 2;
-		} else if ((id = magicmouse_firm_touch(msc)) >= 0) {
-			int x = msc->touches[id].x;
-			if (x < middle_button_start)
-				state = 1;
-			else if (x > middle_button_stop)
-				state = 2;
-			else
-				state = 4;
-			}/* else: we keep the mouse's guess */
-		input_report_key(msc->input, BTN_MIDDLE, state & 4);
-	}
-
-	input_report_key(msc->input, BTN_LEFT, state & 1);
-	input_report_key(msc->input, BTN_RIGHT, state & 2);
-
-	if (state != last_state)
-		msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
-}
 
 static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id,
 		u8 *tdata, int npoints)
@@ -293,12 +203,6 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id,
 		down = state == 0x80;
 	}
 
-	/* Store tracking ID and other fields. */
-	msc->tracking_ids[raw_id] = id;
-	msc->touches[id].x = x;
-	msc->touches[id].y = y;
-	msc->touches[id].size = size;
-
 	/* If requested, emulate a scroll wheel by detecting small
 	 * vertical touch motions.
 	 */
@@ -340,34 +244,6 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id,
 				input_report_rel(input, REL_WHEEL, step_y);
 			}
 			break;
-		}
-	}
-
-	if (down)
-		msc->ntouches++;
-
-	input_mt_slot(input, input_mt_get_slot_by_key(input, id));
-	input_mt_report_slot_state(input, MT_TOOL_FINGER, down);
-
-	/* Generate the input events for this touch. */
-	if (down) {
-		input_report_abs(input, ABS_MT_TOUCH_MAJOR, touch_major << 2);
-		input_report_abs(input, ABS_MT_TOUCH_MINOR, touch_minor << 2);
-		input_report_abs(input, ABS_MT_ORIENTATION, -orientation);
-		input_report_abs(input, ABS_MT_POSITION_X, x);
-		input_report_abs(input, ABS_MT_POSITION_Y, y);
-
-		if (input->id.product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD2) {
-			input_report_abs(input, ABS_TOOL_WIDTH, size);
-			input_report_abs(input, ABS_MT_PRESSURE, pressure + 30);
-		}
-
-		if (report_undeciphered) {
-			if (input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE ||
-				input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE2)
-				input_event(input, EV_MSC, MSC_RAW, tdata[7]);
-			else if (input->id.product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD)
-				input_event(input, EV_MSC, MSC_RAW, tdata[8]);
 		}
 	}
 }
@@ -504,19 +380,19 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 		return 0;
 	}
 
-	if (input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE ||
-		input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE2) {
-		magicmouse_emit_buttons(msc, clicks & 3);
-		input_report_rel(input, REL_X, x);
-		input_report_rel(input, REL_Y, y);
-	} else if (input->id.product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD) {
-		input_report_key(input, BTN_MOUSE, clicks & 1);
-		input_mt_report_pointer_emulation(input, true);
-	}
-	else /* USB_DEVICE_ID_APPLE_MAGICTRACKPAD2 */ {
-		input_mt_sync_frame(input);
-		input_report_key(input, BTN_MOUSE, clicks & 1);
-	}
+	// if (input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE ||
+	// 	input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE2) {
+	// 	magicmouse_emit_buttons(msc, clicks & 3);
+	// 	input_report_rel(input, REL_X, x);
+	// 	input_report_rel(input, REL_Y, y);
+	// } else if (input->id.product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD) {
+	// 	input_report_key(input, BTN_MOUSE, clicks & 1);
+	// 	input_mt_report_pointer_emulation(input, true);
+	// }
+	// else /* USB_DEVICE_ID_APPLE_MAGICTRACKPAD2 */ {
+	// 	input_mt_sync_frame(input);
+	// 	input_report_key(input, BTN_MOUSE, clicks & 1);
+	// }
 
 	input_sync(input);
 	return 1;
