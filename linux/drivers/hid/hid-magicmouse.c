@@ -24,18 +24,6 @@
 
 #include "hid-ids.h"
 
-static bool emulate_3button = false;
-module_param(emulate_3button, bool, 0644);
-MODULE_PARM_DESC(emulate_3button, "Emulate a middle button");
-
-static bool middle_click_3finger = false;
-module_param(middle_click_3finger, bool, 0644);
-MODULE_PARM_DESC(middle_click_3finger, "Use 3 finger click to emulate middle button");
-
-static bool emulate_scroll_wheel = true;
-module_param(emulate_scroll_wheel, bool, 0644);
-MODULE_PARM_DESC(emulate_scroll_wheel, "Emulate a scroll wheel");
-
 static unsigned int scroll_speed = 5;
 static int param_set_scroll_speed(const char *val,
 				  const struct kernel_param *kp) {
@@ -51,10 +39,6 @@ MODULE_PARM_DESC(scroll_speed, "Scroll speed, value from 0 (slow) to 63 (fast)")
 static bool scroll_acceleration = false;
 module_param(scroll_acceleration, bool, 0644);
 MODULE_PARM_DESC(scroll_acceleration, "Accelerate sequential scroll events");
-
-static bool report_undeciphered = false;
-module_param(report_undeciphered, bool, 0644);
-MODULE_PARM_DESC(report_undeciphered, "Report undeciphered multi-touch state field using a MSC_RAW event");
 
 #define TRACKPAD_REPORT_ID 0x28
 #define TRACKPAD2_USB_REPORT_ID 0x02
@@ -143,8 +127,7 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id,
 		u8 *tdata, int npoints)
 {
 	struct input_dev *input = msc->input;
-	int id, x, y, size, orientation, touch_major, touch_minor, state, down;
-	int pressure = 0;
+	int id, x, y, state;
 
 	if (input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE ||
 		input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE2) {
@@ -174,76 +157,49 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id,
 		id = (tdata[6] << 2 | tdata[5] >> 6) & 0xf;
 		x = (tdata[1] << 28 | tdata[0] << 20) >> 20;
 		y = -((tdata[2] << 24 | tdata[1] << 16) >> 20);
-		size = tdata[5] & 0x3f;
-		orientation = (tdata[6] >> 2) - 32;
-		touch_major = tdata[3];
-		touch_minor = tdata[4];
 		state = tdata[7] & TOUCH_STATE_MASK;
-		down = state != TOUCH_STATE_NONE;
-	} else if (input->id.product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD) {
-		id = (tdata[7] << 2 | tdata[6] >> 6) & 0xf;
-		x = (tdata[1] << 27 | tdata[0] << 19) >> 19;
-		y = -((tdata[3] << 30 | tdata[2] << 22 | tdata[1] << 14) >> 19);
-		size = tdata[6] & 0x3f;
-		orientation = (tdata[7] >> 2) - 32;
-		touch_major = tdata[4];
-		touch_minor = tdata[5];
-		state = tdata[8] & TOUCH_STATE_MASK;
-		down = state != TOUCH_STATE_NONE;
-	} else { /* USB_DEVICE_ID_APPLE_MAGICTRACKPAD2 */
-		id = tdata[8] & 0xf;
-		x = (tdata[1] << 27 | tdata[0] << 19) >> 19;
-		y = -((tdata[3] << 30 | tdata[2] << 22 | tdata[1] << 14) >> 19);
-		size = tdata[6];
-		orientation = (tdata[8] >> 5) - 4;
-		touch_major = tdata[4];
-		touch_minor = tdata[5];
-		pressure = tdata[7];
-		state = tdata[3] & 0xC0;
-		down = state == 0x80;
-	}
 
-	/* If requested, emulate a scroll wheel by detecting small
-	 * vertical touch motions.
-	 */
-	if (emulate_scroll_wheel &&
-			(input->id.product != USB_DEVICE_ID_APPLE_MAGICTRACKPAD2)) {
-		unsigned long now = jiffies;
-		int step_x = msc->touches[id].scroll_x - x;
-		int step_y = msc->touches[id].scroll_y - y;
+		/* If requested, emulate a scroll wheel by detecting small
+		* vertical touch motions.
+		*/
+		{
+			unsigned long now = jiffies;
+			int step_x = msc->touches[id].scroll_x - x;
+			int step_y = msc->touches[id].scroll_y - y;
 
-		/* Calculate and apply the scroll motion. */
-		switch (state) {
-		case TOUCH_STATE_START:
-			msc->touches[id].scroll_x = x;
-			msc->touches[id].scroll_y = y;
+			/* Calculate and apply the scroll motion. */
+			switch (state) {
+			case TOUCH_STATE_START:
+				msc->touches[id].scroll_x = x;
+				msc->touches[id].scroll_y = y;
 
-			/* Reset acceleration after half a second. */
-			if (scroll_acceleration && time_before(now,
-						msc->scroll_jiffies + HZ / 2))
-				msc->scroll_accel = max_t(int,
-						msc->scroll_accel - 1, 1);
-			else
-				msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
+				/* Reset acceleration after half a second. */
+				if (scroll_acceleration && time_before(now,
+							msc->scroll_jiffies + HZ / 2))
+					msc->scroll_accel = max_t(int,
+							msc->scroll_accel - 1, 1);
+				else
+					msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
 
-			break;
-		case TOUCH_STATE_DRAG:
-			step_x /= (64 - (int)scroll_speed) * msc->scroll_accel;
-			if (step_x != 0) {
-				msc->touches[id].scroll_x -= step_x *
-					(64 - scroll_speed) * msc->scroll_accel;
-				msc->scroll_jiffies = now;
-				input_report_rel(input, REL_HWHEEL, -step_x);
+				break;
+			case TOUCH_STATE_DRAG:
+				step_x /= (64 - (int)scroll_speed) * msc->scroll_accel;
+				if (step_x != 0) {
+					msc->touches[id].scroll_x -= step_x *
+						(64 - scroll_speed) * msc->scroll_accel;
+					msc->scroll_jiffies = now;
+					input_report_rel(input, REL_HWHEEL, -step_x);
+				}
+
+				step_y /= (64 - (int)scroll_speed) * msc->scroll_accel;
+				if (step_y != 0) {
+					msc->touches[id].scroll_y -= step_y *
+						(64 - scroll_speed) * msc->scroll_accel;
+					msc->scroll_jiffies = now;
+					input_report_rel(input, REL_WHEEL, step_y);
+				}
+				break;
 			}
-
-			step_y /= (64 - (int)scroll_speed) * msc->scroll_accel;
-			if (step_y != 0) {
-				msc->touches[id].scroll_y -= step_y *
-					(64 - scroll_speed) * msc->scroll_accel;
-				msc->scroll_jiffies = now;
-				input_report_rel(input, REL_WHEEL, step_y);
-			}
-			break;
 		}
 	}
 }
@@ -256,39 +212,6 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 	int x = 0, y = 0, ii, clicks = 0, npoints;
 
 	switch (data[0]) {
-	case TRACKPAD_REPORT_ID:
-	case TRACKPAD2_BT_REPORT_ID:
-		/* Expect four bytes of prefix, and N*9 bytes of touch data. */
-		if (size < 4 || ((size - 4) % 9) != 0)
-			return 0;
-		npoints = (size - 4) / 9;
-		if (npoints > 15) {
-			hid_warn(hdev, "invalid size value (%d) for TRACKPAD_REPORT_ID\n",
-					size);
-			return 0;
-		}
-		msc->ntouches = 0;
-		for (ii = 0; ii < npoints; ii++)
-			magicmouse_emit_touch(msc, ii, data + ii * 9 + 4, npoints);
-
-		clicks = data[1];
-		break;
-	case TRACKPAD2_USB_REPORT_ID:
-		/* Expect twelve bytes of prefix, and N*9 bytes of touch data. */
-		if (size < 12 || ((size - 12) % 9) != 0)
-			return 0;
-		npoints = (size - 12) / 9;
-		if (npoints > 15) {
-			hid_warn(hdev, "invalid size value (%d) for TRACKPAD_REPORT_ID\n",
-					size);
-			return 0;
-		}
-		msc->ntouches = 0;
-		for (ii = 0; ii < npoints; ii++)
-			magicmouse_emit_touch(msc, ii, data + ii * 9 + 12, npoints);
-
-		clicks = data[1];
-		break;
 	case MOUSE_REPORT_ID:
 		/* Expect six bytes of prefix, and N*8 bytes of touch data. */
 		if (size < 6 || ((size - 6) % 8) != 0)
@@ -380,156 +303,22 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 		return 0;
 	}
 
-	// if (input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE ||
-	// 	input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE2) {
-	// 	magicmouse_emit_buttons(msc, clicks & 3);
-	// 	input_report_rel(input, REL_X, x);
-	// 	input_report_rel(input, REL_Y, y);
-	// } else if (input->id.product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD) {
-	// 	input_report_key(input, BTN_MOUSE, clicks & 1);
-	// 	input_mt_report_pointer_emulation(input, true);
-	// }
-	// else /* USB_DEVICE_ID_APPLE_MAGICTRACKPAD2 */ {
-	// 	input_mt_sync_frame(input);
-	// 	input_report_key(input, BTN_MOUSE, clicks & 1);
-	// }
-
 	input_sync(input);
 	return 1;
 }
 
 static int magicmouse_setup_input(struct input_dev *input, struct hid_device *hdev)
 {
-	int error;
-	int mt_flags = 0;
-
 	__set_bit(EV_KEY, input->evbit);
 
 	if (input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE ||
 		input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE2) {
-		__set_bit(BTN_LEFT, input->keybit);
-		__set_bit(BTN_RIGHT, input->keybit);
-		if (emulate_3button)
-			__set_bit(BTN_MIDDLE, input->keybit);
-
 		__set_bit(EV_REL, input->evbit);
-		__set_bit(REL_X, input->relbit);
-		__set_bit(REL_Y, input->relbit);
-		if (emulate_scroll_wheel) {
-			__set_bit(REL_WHEEL, input->relbit);
-			__set_bit(REL_HWHEEL, input->relbit);
-		}
-	} else if (input->id.product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD){
-		/* input->keybit is initialized with incorrect button info
-		 * for Magic Trackpad. There really is only one physical
-		 * button (BTN_LEFT == BTN_MOUSE). Make sure we don't
-		 * advertise buttons that don't exist...
-		 */
-		__clear_bit(BTN_RIGHT, input->keybit);
-		__clear_bit(BTN_MIDDLE, input->keybit);
-		__set_bit(BTN_MOUSE, input->keybit);
-		__set_bit(BTN_TOOL_FINGER, input->keybit);
-		__set_bit(BTN_TOOL_DOUBLETAP, input->keybit);
-		__set_bit(BTN_TOOL_TRIPLETAP, input->keybit);
-		__set_bit(BTN_TOOL_QUADTAP, input->keybit);
-		__set_bit(BTN_TOOL_QUINTTAP, input->keybit);
-		__set_bit(BTN_TOUCH, input->keybit);
-		__set_bit(INPUT_PROP_POINTER, input->propbit);
-		__set_bit(INPUT_PROP_BUTTONPAD, input->propbit);
-	}
-	else { /* USB_DEVICE_ID_APPLE_MAGICTRACKPAD2) */
-
-		/* setting the device name to ensure the same driver settings
-		 * get loaded, whether connected through bluetooth or USB
-		 */
-		input->name = "Apple Inc. Magic Trackpad 2";
-
-		__clear_bit(EV_MSC, input->evbit);
-		__clear_bit(ABS_TOOL_WIDTH, input->absbit);
-		__clear_bit(BTN_0, input->keybit);
-		__clear_bit(BTN_RIGHT, input->keybit);
-		__clear_bit(BTN_MIDDLE, input->keybit);
-		__set_bit(BTN_MOUSE, input->keybit);
-		__set_bit(INPUT_PROP_BUTTONPAD, input->propbit);
-		__set_bit(BTN_TOOL_FINGER, input->keybit);
-
-		mt_flags = INPUT_MT_POINTER | INPUT_MT_DROP_UNUSED | INPUT_MT_TRACK;
-	}
-
-
-	__set_bit(EV_ABS, input->evbit);
-
-	error = input_mt_init_slots(input, MAX_TOUCHES, mt_flags);
-	if (error)
-		return error;
-	input_set_abs_params(input, ABS_MT_TOUCH_MAJOR, 0, 255 << 2,
-			     4, 0);
-	input_set_abs_params(input, ABS_MT_TOUCH_MINOR, 0, 255 << 2,
-			     4, 0);
-
-	/* Note: Touch Y position from the device is inverted relative
-	 * to how pointer motion is reported (and relative to how USB
-	 * HID recommends the coordinates work).  This driver keeps
-	 * the origin at the same position, and just uses the additive
-	 * inverse of the reported Y.
-	 */
-	if (input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE ||
-		input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE2) {
-		input_set_abs_params(input, ABS_MT_ORIENTATION, -31, 32, 1, 0);
-		input_set_abs_params(input, ABS_MT_POSITION_X,
-				     MOUSE_MIN_X, MOUSE_MAX_X, 4, 0);
-		input_set_abs_params(input, ABS_MT_POSITION_Y,
-				     MOUSE_MIN_Y, MOUSE_MAX_Y, 4, 0);
-		input_abs_set_res(input, ABS_MT_POSITION_X,
-				  MOUSE_RES_X);
-		input_abs_set_res(input, ABS_MT_POSITION_Y,
-				  MOUSE_RES_Y);
-	} else if (input->id.product ==  USB_DEVICE_ID_APPLE_MAGICTRACKPAD) {
-		input_set_abs_params(input, ABS_MT_ORIENTATION, -31, 32, 1, 0);
-		input_set_abs_params(input, ABS_X, TRACKPAD_MIN_X,
-				     TRACKPAD_MAX_X, 4, 0);
-		input_set_abs_params(input, ABS_Y, TRACKPAD_MIN_Y,
-				     TRACKPAD_MAX_Y, 4, 0);
-		input_set_abs_params(input, ABS_MT_POSITION_X,
-				     TRACKPAD_MIN_X, TRACKPAD_MAX_X, 4, 0);
-		input_set_abs_params(input, ABS_MT_POSITION_Y,
-				     TRACKPAD_MIN_Y, TRACKPAD_MAX_Y, 4, 0);
-
-		input_abs_set_res(input, ABS_X, TRACKPAD_RES_X);
-		input_abs_set_res(input, ABS_Y, TRACKPAD_RES_Y);
-		input_abs_set_res(input, ABS_MT_POSITION_X,
-				  TRACKPAD_RES_X);
-		input_abs_set_res(input, ABS_MT_POSITION_Y,
-				  TRACKPAD_RES_Y);
-	} else { /* USB_DEVICE_ID_APPLE_MAGICTRACKPAD2 */
-		input_set_abs_params(input, ABS_MT_PRESSURE, 0, 283, 0, 0);
-		input_set_abs_params(input, ABS_PRESSURE, 0, 283, 0, 0);
-		input_set_abs_params(input, ABS_TOOL_WIDTH, 0, 255, 0, 0);
-		input_set_abs_params(input, ABS_MT_ORIENTATION, -3, 4, 0, 0);
-		input_set_abs_params(input, ABS_X, TRACKPAD2_MIN_X,
-				     TRACKPAD2_MAX_X, 0, 0);
-		input_set_abs_params(input, ABS_Y, TRACKPAD2_MIN_Y,
-				     TRACKPAD2_MAX_Y, 0, 0);
-		input_set_abs_params(input, ABS_MT_POSITION_X,
-				     TRACKPAD2_MIN_X, TRACKPAD2_MAX_X, 0, 0);
-		input_set_abs_params(input, ABS_MT_POSITION_Y,
-				     TRACKPAD2_MIN_Y, TRACKPAD2_MAX_Y, 0, 0);
-
-		input_abs_set_res(input, ABS_X, TRACKPAD2_RES_X);
-		input_abs_set_res(input, ABS_Y, TRACKPAD2_RES_Y);
-		input_abs_set_res(input, ABS_MT_POSITION_X,
-				  TRACKPAD2_RES_X);
-		input_abs_set_res(input, ABS_MT_POSITION_Y,
-				  TRACKPAD2_RES_Y);
+		__set_bit(REL_WHEEL, input->relbit);
+		__set_bit(REL_HWHEEL, input->relbit);
 	}
 
 	input_set_events_per_packet(input, 60);
-
-	if (report_undeciphered &&
-	    input->id.product != USB_DEVICE_ID_APPLE_MAGICTRACKPAD2) {
-		__set_bit(EV_MSC, input->evbit);
-		__set_bit(MSC_RAW, input->mscbit);
-	}
 
 	return 0;
 }
@@ -576,8 +365,6 @@ static int magicmouse_probe(struct hid_device *hdev,
 {
 	__u8 feature_mt_mouse2_bt[] = { 0xF1, 0x02, 0x01 };
 	__u8 feature_mt[] = { 0xD7, 0x01 };
-	__u8 feature_mt_trackpad2_usb[] = { 0x02, 0x01 };
-	__u8 feature_mt_trackpad2_bt[] = { 0xF1, 0x02, 0x01 };
 	__u8 *feature;
 	struct magicmouse_sc *msc;
 	struct hid_report *report;
@@ -621,24 +408,12 @@ static int magicmouse_probe(struct hid_device *hdev,
 		goto err_stop_hw;
 	}
 
-	if (id->product == USB_DEVICE_ID_APPLE_MAGICMOUSE)
+	if (id->product == USB_DEVICE_ID_APPLE_MAGICMOUSE) {
 		report = hid_register_report(hdev, HID_INPUT_REPORT,
 			MOUSE_REPORT_ID, 0);
-	else if (id->product == USB_DEVICE_ID_APPLE_MAGICMOUSE2)
+	} else if (id->product == USB_DEVICE_ID_APPLE_MAGICMOUSE2) {
 		report = hid_register_report(hdev, HID_INPUT_REPORT,
 			MOUSE2_REQUEST_REPORT_ID, 0);
-	else if (id->product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD) {
-		report = hid_register_report(hdev, HID_INPUT_REPORT,
-			TRACKPAD_REPORT_ID, 0);
-		report = hid_register_report(hdev, HID_INPUT_REPORT,
-			DOUBLE_REPORT_ID, 0);
-	} else { /* USB_DEVICE_ID_APPLE_MAGICTRACKPAD2 */
-		if (id->vendor == BT_VENDOR_ID_APPLE)
-			report = hid_register_report(hdev, HID_INPUT_REPORT,
-				TRACKPAD2_BT_REPORT_ID, 0);
-		else /* USB_VENDOR_ID_APPLE */
-			report = hid_register_report(hdev, HID_INPUT_REPORT,
-				TRACKPAD2_USB_REPORT_ID, 0);
 	}
 
 	if (!report) {
@@ -657,24 +432,13 @@ static int magicmouse_probe(struct hid_device *hdev,
 	 * but there seems to be no other way of switching the mode.
 	 * Thus the super-ugly hacky success check below.
 	 */
-	if (id->product == USB_DEVICE_ID_APPLE_MAGICMOUSE ||
-	    id->product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD) {
+	if (id->product == USB_DEVICE_ID_APPLE_MAGICMOUSE ) {
 		feature_size = sizeof(feature_mt);
 		feature = kmemdup(feature_mt, feature_size, GFP_KERNEL);
 	}
 	else if (id->product == USB_DEVICE_ID_APPLE_MAGICMOUSE2){
 		feature_size = sizeof(feature_mt_mouse2_bt);
 		feature = kmemdup(feature_mt_mouse2_bt, feature_size, GFP_KERNEL);
-	} else { /* USB_DEVICE_ID_APPLE_MAGICTRACKPAD2 */
-		if (id->vendor == BT_VENDOR_ID_APPLE) {
-			feature_size = sizeof(feature_mt_trackpad2_bt);
-			feature = kmemdup(feature_mt_trackpad2_bt, feature_size,
-					  GFP_KERNEL);
-		} else { /* USB_VENDOR_ID_APPLE */
-			feature_size = sizeof(feature_mt_trackpad2_usb);
-			feature = kmemdup(feature_mt_trackpad2_usb, feature_size,
-					  GFP_KERNEL);
-		}
 	}
 	if (!feature) {
 		ret = -ENOMEM;
